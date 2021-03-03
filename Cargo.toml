@@ -1,0 +1,23 @@
+[package]
+name = "vine"
+version = "0.1.0"
+authors = ["William Young <wil.wyo@gmail.com>"]
+edition = "2018"
+publish = false
+
+readme = "README.md"
+repository = "https://github.com/wi-wq/vine"
+license-file = "LICENSE"
+keywords = ["text", "editor"]
+categories = ["text-editors"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[dependencies]
+log = "^0.4"
+serde = "^1.0"
+simplelog = "^0.9"
+structopt = "^0.3"
+unicode-segmentation = "^1.7"
