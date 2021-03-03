@@ -1,6 +1,8 @@
 use simplelog as sl;
 use structopt::StructOpt;
 
+mod rope;
+
 #[derive(StructOpt)]
 struct Opt {
 	/// May be off, error, warn, info, debug, trace
