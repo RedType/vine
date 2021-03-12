@@ -10,17 +10,30 @@ pub enum Rope {
     Branch {
         length: usize,
         depth: usize,
+        newlines: Vec<usize>,
         left: Option<Arc<Rope>>,
         right: Option<Arc<Rope>>,
     },
     Leaf {
         length: usize,
+        newlines: Vec<usize>,
         text: String,
     },
 }
 
+impl Default for Rope {
+    fn default() -> Self {
+        Self::Leaf {
+            length: 0,
+            newlines: Vec::new(),
+            text: "".to_owned(),
+        }
+    }
+}
+
 impl Rope {
     const LEAF_UNIT_COUNT: usize = 32;
+    const NEWLINE: &'static str = "\n";
 
     pub fn from_str(s: &str) -> Arc<Self> {
         // assemble leaves
@@ -29,9 +42,11 @@ impl Rope {
         // split input string into chunks
         while let Some(_) = gs.peek() {
             let mut length = Self::LEAF_UNIT_COUNT;
+            let mut newlines = Vec::new();
             let mut text = String::new();
             for i in 0..Self::LEAF_UNIT_COUNT {
                 if let Some(g) = gs.next() {
+                    if g == Self::NEWLINE { newlines.push(i); }
                     text.push_str(g);
                 } else {
                     length = i;
@@ -40,14 +55,14 @@ impl Rope {
             }
             // since this string will never be modified again...
             text.shrink_to_fit();
-            leaves.push(Arc::new(Self::Leaf { length, text }));
+            leaves.push(Arc::new(Self::Leaf { length, newlines, text }));
         }
         Self::from_leaves(&leaves)
     }
 
     fn from_leaves(leaves: &[Arc<Self>]) -> Arc<Self> {
         match leaves.len() {
-            0 => panic!("Attempted to create a rope from 0 leaves"),
+            0 => Arc::new(Self::default()),
             1 => Arc::clone(&leaves[0]),
             n => {
                 let half = n / 2;
@@ -62,16 +77,27 @@ impl Rope {
 
     pub fn concat(left: &Arc<Self>, right: &Arc<Self>) -> Arc<Self> {
         // short leaf optimization
-        if let Self::Leaf { length: ref rlen, text: ref rtext } = **right {
+        if let Self::Leaf {
+            length: ref rlen,
+            newlines: ref r_newlines,
+            text: ref rtext
+        } = **right {
             let mut lhandle = left;
             while let Self::Branch { right: Some(ref r), .. } = **lhandle {
                 lhandle = &r;
             }
-            if let Self::Leaf { length: ref llen, text: ref ltext } = **lhandle {
+            if let Self::Leaf {
+                length: ref llen,
+                newlines: ref l_newlines,
+                text: ref ltext
+            } = **lhandle {
                 if *llen + *rlen <= Self::LEAF_UNIT_COUNT {
                     // build new tree
+                    let mut newlines = l_newlines.clone();
+                    newlines.extend(r_newlines.iter().map(|i| i + llen));
                     return Self::concat_slo_helper(left, *rlen, Arc::new(Self::Leaf {
                         length: *llen + *rlen,
+                        newlines,
                         text: ltext.graphemes(true).chain(rtext.graphemes(true)).collect(),
                     }));
                 }
@@ -82,6 +108,9 @@ impl Rope {
         Arc::new(Self::Branch {
             length: left.len() + right.len(),
             depth: left.depth().max(right.depth()) + 1,
+            newlines: left.newlines().iter().map(|x| *x).chain(
+                right.newlines().iter().map(|i| i + left.len())
+            ).collect(),
             left: Some(Arc::clone(left)),
             right: Some(Arc::clone(right)),
         })
@@ -89,13 +118,26 @@ impl Rope {
 
     fn concat_slo_helper(root: &Arc<Self>, lmod: usize, leaf: Arc<Self>) -> Arc<Self> {
         match **root {
-            Self::Branch { length, depth, ref left, right: Some(ref r) } =>
+            Self::Branch {
+                length,
+                depth,
+                ref newlines,
+                ref left,
+                right: Some(ref r)
+            } => {
+                let new_right = Self::concat_slo_helper(r, lmod, leaf);
+                let newlines = newlines.iter().map(|x| *x).chain(
+                    new_right.newlines().iter()
+                        .map(|i| i + left.as_ref().map(|l| l.len()).unwrap_or(0))
+                ).collect();
                 Arc::new(Self::Branch { 
                     length: length + lmod,
                     depth: depth,
+                    newlines,
                     left: left.clone(),
-                    right: Some(Self::concat_slo_helper(r, lmod, leaf)),
-                }),
+                    right: Some(new_right),
+                })
+            },
             _ => leaf,
         }
     }
@@ -188,6 +230,13 @@ impl Rope {
         }
     }
 
+    pub fn newlines(&self) -> &Vec<usize> {
+        match self {
+            Self::Leaf { ref newlines, .. } => newlines,
+            Self::Branch { ref newlines, .. } => newlines,
+        }
+    }
+
     pub fn weight(&self) -> usize {
         match self {
             Self::Leaf { length, .. } => *length,
@@ -214,12 +263,6 @@ fn builds_without_crashing() {
 }
 
 #[test]
-#[should_panic(expected = "Attempted to create a rope from 0 leaves")]
-fn empty_panic() {
-    let _ = Rope::from_str(&"");
-}
-
-#[test]
 fn iterates_full_range() {
     let corpus = "abcdefghijklmnopqrstuvwxyz ".chars().cycle().take(100).collect::<String>();
     let root = Rope::from_str(&corpus);
@@ -243,15 +286,30 @@ fn iterates_partial_range() {
 }
 
 #[test]
+fn newlines_are_correct() {
+    let text = "abcdefghijklmnopqrstuvwxyz\n";
+    let corpus = text.chars().cycle().take(text.len() * 100).collect::<String>();
+    let root = Rope::from_str(&corpus);
+    let expected = (1..=100).map(|i| i * text.len() - 1).collect::<Vec<usize>>();
+    let found = root.newlines();
+
+    println!("expected: {:?}", expected);
+    println!("   found: {:?}", *found);
+    assert_eq!(expected, *found);
+}
+
+#[test]
 fn concat_short_leaf_optimization_flat() {
     use std::mem::discriminant;
 
     let flat_left = Arc::new(Rope::Leaf {
         length: "a".graphemes(true).count(),
+        newlines: Vec::new(),
         text: "a".to_owned(),
     });
     let flat_right = Arc::new(Rope::Leaf {
         length: "b".graphemes(true).count(),
+        newlines: Vec::new(),
         text: "b".to_owned(),
     });
 
@@ -259,7 +317,7 @@ fn concat_short_leaf_optimization_flat() {
     assert_eq!(short_cat.range(..).collect::<String>(), "ab");
     assert_eq!(
         discriminant(&*short_cat),
-        discriminant(&Rope::Leaf { length: 0, text: "".to_owned() }),
+        discriminant(&Rope::default()),
     );
 }
 
@@ -270,19 +328,23 @@ fn concat_short_leaf_optimization_tall() {
     let tall_left = Arc::new(Rope::Branch {
         length: "a".graphemes(true).count(),
         depth: 2,
+        newlines: Vec::new(),
         left: None,
         right: Some(Arc::new(Rope::Branch {
             length: "a".graphemes(true).count(),
             depth: 1,
+            newlines: Vec::new(),
             left: None,
             right: Some(Arc::new(Rope::Leaf {
                 length: "a".graphemes(true).count(),
+                newlines: Vec::new(),
                 text: "a".to_owned(),
             })),
         })),
     });
     let flat_right = Arc::new(Rope::Leaf {
         length: "b".graphemes(true).count(),
+        newlines: Vec::new(),
         text: "b".to_owned(),
     });
 
@@ -290,6 +352,12 @@ fn concat_short_leaf_optimization_tall() {
     assert_eq!(tall_cat.range(..).collect::<String>(), "ab");
     assert_eq!(
         discriminant(&*tall_cat),
-        discriminant(&Rope::Branch { length: 0, depth: 1, left: None, right: None }),
+        discriminant(&Rope::Branch {
+            length: 0,
+            depth: 1,
+            newlines: Vec::new(),
+            left: None,
+            right: None
+        }),
     );
 }
