@@ -67,52 +67,71 @@ impl Rope {
             n => {
                 let half = n / 2;
                 let root = Self::concat(
-                    &Self::from_leaves(&leaves[0..half]),
-                    &Self::from_leaves(&leaves[half..n]),
+                    Some(&Self::from_leaves(&leaves[0..half])),
+                    Some(&Self::from_leaves(&leaves[half..n])),
                 );
                 root
             },
         }
     }
 
-    pub fn concat(left: &Arc<Self>, right: &Arc<Self>) -> Arc<Self> {
+    pub fn concat(left: Option<&Arc<Self>>, right: Option<&Arc<Self>>) -> Arc<Self> {
         // short leaf optimization
-        if let Self::Leaf {
-            length: ref rlen,
-            newlines: ref r_newlines,
-            text: ref rtext
-        } = **right {
-            let mut lhandle = left;
-            while let Self::Branch { right: Some(ref r), .. } = **lhandle {
-                lhandle = &r;
-            }
+        if let (Some(left), Some(right)) = (&left, &right) {
             if let Self::Leaf {
-                length: ref llen,
-                newlines: ref l_newlines,
-                text: ref ltext
-            } = **lhandle {
-                if *llen + *rlen <= Self::LEAF_UNIT_COUNT {
-                    // build new tree
-                    let mut newlines = l_newlines.clone();
-                    newlines.extend(r_newlines.iter().map(|i| i + llen));
-                    return Self::concat_slo_helper(left, *rlen, Arc::new(Self::Leaf {
-                        length: *llen + *rlen,
-                        newlines,
-                        text: ltext.graphemes(true).chain(rtext.graphemes(true)).collect(),
-                    }));
+                length: ref rlen,
+                newlines: ref r_newlines,
+                text: ref rtext
+            } = ***right {
+                let mut lhandle = *left;
+                while let Self::Branch { right: Some(ref r), .. } = **lhandle {
+                    lhandle = &r;
+                }
+                if let Self::Leaf {
+                    length: ref llen,
+                    newlines: ref l_newlines,
+                    text: ref ltext
+                } = **lhandle {
+                    if *llen + *rlen <= Self::LEAF_UNIT_COUNT {
+                        // build new tree
+                        let mut newlines = l_newlines.clone();
+                        newlines.extend(r_newlines.iter().map(|i| i + llen));
+                        return Self::concat_slo_helper(left, *rlen, Arc::new(Self::Leaf {
+                            length: *llen + *rlen,
+                            newlines,
+                            text: ltext.graphemes(true).chain(rtext.graphemes(true)).collect(),
+                        }));
+                    }
                 }
             }
         }
 
         // general case
+        let (llen, rlen) = (
+             left.map(|l| l.len())
+                 .unwrap_or(0),
+            right.map(|r| r.len())
+                .unwrap_or(0),
+        );
+        let (ldep, rdep) = (
+             left.map(|l| l.depth())
+                 .unwrap_or(0),
+            right.map(|r| r.depth())
+                 .unwrap_or(0),
+        );
+        let empty: Vec<usize> = Vec::new();
         Arc::new(Self::Branch {
-            length: left.len() + right.len(),
-            depth: left.depth().max(right.depth()) + 1,
-            newlines: left.newlines().iter().map(|x| *x).chain(
-                right.newlines().iter().map(|i| i + left.len())
-            ).collect(),
-            left: Some(Arc::clone(left)),
-            right: Some(Arc::clone(right)),
+            length: llen + rlen,
+            depth: ldep.max(rdep) + 1,
+            newlines: left.map(|l| l.newlines().iter())
+                          .unwrap_or(empty.iter())
+                          .map(|x| *x).chain(
+                              right.map(|r| r.newlines().iter())
+                                   .unwrap_or(empty.iter())
+                                   .map(|i| i + llen)
+                          ).collect(),
+            left: left.cloned(),
+            right: right.cloned(),
         })
     }
 
@@ -143,7 +162,62 @@ impl Rope {
     }
 
     pub fn split(&self, i: usize) -> (Arc<Self>, Arc<Self>) {
-        todo!();
+        (self.split_left(i), self.split_right(i))
+    }
+
+    pub fn split_left(&self, i: usize) -> Arc<Self> {
+        match self {
+            Self::Branch { length, depth, ref newlines, ref left, ref right, .. } => {
+                let mut left = left.as_ref().cloned();
+                let mut right = right.as_ref().cloned();
+                if i < self.weight() {
+                    left = left.map(|l| l.split_left(i));
+                    right = None;
+                } else {
+                    right = right.map(|r| r.split_left(i - self.weight()));
+                }
+
+                Self::concat(left.as_ref(), right.as_ref())
+            },
+            Self::Leaf { ref newlines, ref text, .. } => {
+                Arc::new(Self::Leaf {
+                    length: i,
+                    newlines: newlines.iter()
+                                      .copied()
+                                      .filter(|n| *n < i)
+                                      .collect(),
+                    text: text[..i].to_owned(),
+                })
+            },
+        }
+    }
+
+    pub fn split_right(&self, i: usize) -> Arc<Self> {
+        match self {
+            Self::Branch { length, ref left, ref right, .. } => {
+                let mut left = left.as_ref().cloned();
+                let mut right = right.as_ref().cloned();
+                if i <= self.weight() {
+                    left = left.map(|l| l.split_right(i));
+                } else {
+                    left = None;
+                    right = right.map(|r| r.split_right(i - self.weight()));
+                }
+
+                Self::concat(left.as_ref(), right.as_ref())
+            },
+            Self::Leaf { length, ref newlines, ref text } => {
+                Arc::new(Self::Leaf {
+                    length: length - i,
+                    newlines: newlines.iter()
+                                      .copied()
+                                      .filter(|n| *n >= i)
+                                      .map(|n| n - i)
+                                      .collect(),
+                    text: text[i..].to_owned(),
+                })
+            },
+        }
     }
 
     pub fn balance(&self) -> Arc<Self> {
@@ -154,6 +228,7 @@ impl Rope {
         let depth = self.depth() as i64;
         let expected_depth = (self.len() as f64).log2() as i64;
         let diff = depth - expected_depth;
+        // balanced enough
         diff <= 2 && diff >= 0
     }
 
@@ -286,19 +361,6 @@ fn iterates_partial_range() {
 }
 
 #[test]
-fn newlines_are_correct() {
-    let text = "abcdefghijklmnopqrstuvwxyz\n";
-    let corpus = text.chars().cycle().take(text.len() * 100).collect::<String>();
-    let root = Rope::from_str(&corpus);
-    let expected = (1..=100).map(|i| i * text.len() - 1).collect::<Vec<usize>>();
-    let found = root.newlines();
-
-    println!("expected: {:?}", expected);
-    println!("   found: {:?}", *found);
-    assert_eq!(expected, *found);
-}
-
-#[test]
 fn concat_short_leaf_optimization_flat() {
     use std::mem::discriminant;
 
@@ -313,7 +375,7 @@ fn concat_short_leaf_optimization_flat() {
         text: "b".to_owned(),
     });
 
-    let short_cat = Rope::concat(&flat_left, &flat_right);
+    let short_cat = Rope::concat(Some(&flat_left), Some(&flat_right));
     assert_eq!(short_cat.range(..).collect::<String>(), "ab");
     assert_eq!(
         discriminant(&*short_cat),
@@ -348,7 +410,7 @@ fn concat_short_leaf_optimization_tall() {
         text: "b".to_owned(),
     });
 
-    let tall_cat = Rope::concat(&tall_left, &flat_right);
+    let tall_cat = Rope::concat(Some(&tall_left), Some(&flat_right));
     assert_eq!(tall_cat.range(..).collect::<String>(), "ab");
     assert_eq!(
         discriminant(&*tall_cat),
@@ -360,4 +422,57 @@ fn concat_short_leaf_optimization_tall() {
             right: None
         }),
     );
+}
+
+#[test]
+fn newlines_are_correct() {
+    let text = "abcdefghijklmnopqrstuvwxyz\n";
+    let corpus = text.chars().cycle().take(text.len() * 100).collect::<String>();
+    let root = Rope::from_str(&corpus);
+    let expected = (1..=100).map(|i| i * text.len() - 1).collect::<Vec<usize>>();
+    let found = root.newlines();
+
+    println!("expected: {:?}", expected);
+    println!("   found: {:?}", *found);
+    assert_eq!(expected, *found);
+}
+
+#[test]
+fn concat_short_leaf_optimization_newlines_are_correct() {
+    let left = Rope::from_str("abc\n");
+    let right = Rope::from_str("def\n");
+    let root = Rope::concat(Some(&left), Some(&right));
+
+    let expected = vec![3, 7];
+    let found = root.newlines();
+
+    println!("expected: {:?}", expected);
+    println!("   found: {:?}", *found);
+    assert_eq!(expected, *found);
+}
+
+#[test]
+fn splits_are_correct() {
+    let corpus = "sixteen chars\n\n\n".chars().cycle().take(100).collect::<String>();
+    let root = Rope::from_str(&corpus);
+    let (left1, right1) = root.split(68);
+    assert_eq!(&left1.range(..).collect::<String>(), &corpus[..68]);
+    assert_eq!(&right1.range(..).collect::<String>(), &corpus[68..]);
+    assert_eq!(*left1.newlines(), root.newlines()
+                                     .iter()
+                                     .copied()
+                                     .filter(|n| *n < 68)
+                                     .collect::<Vec<_>>());
+    assert_eq!(*right1.newlines(), root.newlines()
+                                      .iter()
+                                      .copied()
+                                      .filter(|n| *n >= 68)
+                                      .map(|n| n - 68)
+                                      .collect::<Vec<_>>());
+
+    let short_split = "short split";
+    let root2 = Rope::from_str(short_split);
+    let (left2, right2) = root2.split(6);
+    assert_eq!(&left2.range(..).collect::<String>(), "short ");
+    assert_eq!(&right2.range(..).collect::<String>(), "split");
 }
