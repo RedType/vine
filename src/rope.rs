@@ -26,7 +26,7 @@ impl Default for Rope {
         Self::Leaf {
             length: 0,
             newlines: Vec::new(),
-            text: "".to_owned(),
+            text: String::new(),
         }
     }
 }
